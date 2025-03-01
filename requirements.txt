@@ -3,6 +3,4 @@ ultralytics
 streamlit
 python-dotenv
 torch
-smtplib
-email
 numpy
