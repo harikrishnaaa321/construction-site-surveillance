@@ -1,0 +1,6 @@
+opencv-python
+smtplib
+email
+ultralytics
+streamlit
+python-dotenv
