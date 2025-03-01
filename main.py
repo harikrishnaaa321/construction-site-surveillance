@@ -2,6 +2,7 @@ import os
 import time
 import cv2
 import smtplib
+import asyncio
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from ultralytics import YOLO
@@ -9,20 +10,24 @@ import streamlit as st
 from dotenv import load_dotenv
 from datetime import datetime
 
-# Load environment variables from .env file (if any)
+# Load environment variables
 load_dotenv()
 
-# Sender email and password (stored in environment variables)
-sender_email = os.getenv("SENDER_EMAIL")  # Sender's fixed email (stored in .env)
-app_password = os.getenv("APP_PASSWORD")  # App password (stored in .env)
+# Sender email credentials
+sender_email = os.getenv("SENDER_EMAIL")
+app_password = os.getenv("APP_PASSWORD")
 
 # Streamlit UI setup
-st.title("👷‍♂️ Safety Compliance Detection")
+st.title("🥷 Safety Compliance Detection")
 st.sidebar.header("Settings")
 recipient_email = st.sidebar.text_input("Enter recipient email address:")
 
-# Load YOLOv8 model
-model = YOLO("best.pt")  # Update with your model path
+# Load YOLO model with error handling
+try:
+    model = YOLO("best.pt")  # Update with your model path
+except Exception as e:
+    st.error(f"Error loading YOLO model: {str(e)}")
+    st.stop()
 
 # Class names
 class_names = [
@@ -30,51 +35,36 @@ class_names = [
     "Person", "Safety Cone", "Safety Vest", "Machinery", "Vehicle"
 ]
 
-# Initialize event counting
-event_count = 0
+# Initialize event tracking
+violation_counts = {"NO-Helmet": 0, "NO-Mask": 0, "NO-Safety Vest": 0}
+violation_times = {"NO-Helmet": [], "NO-Mask": [], "NO-Safety Vest": []}
+
+# Attempt to open the camera safely
+cap = None
+for i in range(5):  # Try multiple indexes in case of failure
+    cap = cv2.VideoCapture(i)
+    if cap.isOpened():
+        break
+    cap.release()
+
+if not cap or not cap.isOpened():
+    st.error("🚨 Camera not found. Please check your webcam and try again.")
+    st.stop()
+
+frame_placeholder = st.empty()
+confidence_threshold = 0.45
 start_time = time.time()
 last_sent_time = 0
 
-# Dictionary to track violation counts
-violation_counts = {
-    "NO-Helmet": 0,
-    "NO-Mask": 0,
-    "NO-Safety Vest": 0
-}
+# Function to send email
+async def send_email_alert(violation_counts, violation_times, recipient_email):
+    violation_details = "\n".join(
+        f"Between {times[0]} and {times[-1]}: {count} {violation} violations detected"
+        for violation, (count, times) in zip(violation_counts.keys(), violation_times.items()) if count > 0
+    )
 
-# List to track violation times
-violation_times = {
-    "NO-Helmet": [],
-    "NO-Mask": [],
-    "NO-Safety Vest": []
-}
-
-# OpenCV Webcam Stream
-cap = cv2.VideoCapture(0)
-
-# Streamlit live display
-frame_placeholder = st.empty()
-
-# Fixed confidence threshold
-confidence_threshold = 0.45
-
-
-def send_email_alert(violation_counts, violation_times, recipient_email):
-    """Send an email notification with violation counts and times."""
-
-    # Prepare violation details for email
-    violation_details = ""
-    for violation, count in violation_counts.items():
-        if count > 0:
-            # Format the violation time as a range and number of violations
-            time_range = f"Between {violation_times[violation][0]} and {violation_times[violation][-1]}"
-            violation_details += f"{time_range}: {count} {violation} violations detected\n"
-
-    # Email content
     subject = "Safety Alert: Compliance Violations"
-    body = f"🚨 Safety Alert: The following violations were detected:\n\n{violation_details}"
-
-    # Set up the MIME
+    body = f"\ud83d\udea8 Safety Alert:\n\n{violation_details}"
     msg = MIMEMultipart()
     msg['From'] = sender_email
     msg['To'] = recipient_email
@@ -82,103 +72,69 @@ def send_email_alert(violation_counts, violation_times, recipient_email):
     msg.attach(MIMEText(body, 'plain'))
 
     try:
-        # Set up the SMTP server and send the email
         server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()  # Start TLS encryption
-        server.login(sender_email, app_password)  # Log in with your email and app password
-        text = msg.as_string()
-        server.sendmail(sender_email, recipient_email, text)
-        server.quit()  # Close the connection
-
+        server.starttls()
+        server.login(sender_email, app_password)
+        server.sendmail(sender_email, recipient_email, msg.as_string())
+        server.quit()
         st.success(f"✅ Email sent to {recipient_email}!")
-
     except Exception as e:
         st.error(f"❌ Error sending email: {str(e)}")
 
-
+# Capture and process frames
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
+        st.error("Failed to capture video frame.")
         break
 
-    # YOLO detection
     results = model(frame)
     detected_classes = set()
-    frame_violation_counts = {
-        "NO-Helmet": 0,
-        "NO-Mask": 0,
-        "NO-Safety Vest": 0
-    }
+    frame_violation_counts = {key: 0 for key in violation_counts}
 
-    # First loop: Collect detected classes and log violations
     for r in results:
         for box in r.boxes:
             conf = box.conf[0].item()
-            if conf >= confidence_threshold:  # Apply fixed threshold for detection
+            if conf >= confidence_threshold:
                 cls = int(box.cls[0].item())
                 detected_classes.add(class_names[cls])
-
-                # Log violation if it's a "NO-" class (violation detected)
                 if "NO-" in class_names[cls]:
                     violation_type = class_names[cls]
                     frame_violation_counts[violation_type] += 1
-                    violation_times[violation_type].append(str(datetime.now().strftime("%H:%M:%S")))
+                    violation_times[violation_type].append(datetime.now().strftime("%H:%M:%S"))
 
-    # Second loop: Draw bounding boxes for detected violations
     for r in results:
         for box in r.boxes:
             conf = box.conf[0].item()
             if conf < confidence_threshold:
                 continue
-
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             cls = int(box.cls[0].item())
             label_name = class_names[cls]
-
-            # Pairing logic to avoid duplicate alerts
-            if label_name == "NO-Mask" and "Mask" in detected_classes:
-                continue
-            if label_name == "Mask" and "NO-Mask" in detected_classes:
-                continue
-            if label_name == "NO-Helmet" and "Helmet" in detected_classes:
-                continue
-            if label_name == "Helmet" and "NO-Helmet" in detected_classes:
-                continue
-            if label_name == "NO-Safety Vest" and "Safety Vest" in detected_classes:
-                continue
-            if label_name == "Safety Vest" and "NO-Safety Vest" in detected_classes:
+            
+            if label_name.startswith("NO-") and label_name[3:] in detected_classes:
                 continue
 
-            # Set color based on violation
             color = (0, 255, 0) if "NO-" not in label_name else (0, 0, 255)
             label = f"{label_name}: {conf:.2f}"
-
-            # Draw bounding box
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-    # Update global violation counts
     for violation, count in frame_violation_counts.items():
         violation_counts[violation] += count
 
-    # Count violations per minute
     elapsed_time = time.time() - start_time
-    if elapsed_time >= 60:  # Check every 60 seconds
-        if any(count > 0 for count in violation_counts.values()) and (
-                time.time() - last_sent_time) >= 600:  # Send alert if any violation occurred
-            send_email_alert(violation_counts, violation_times, recipient_email)
-            last_sent_time = time.time()
-        event_count = 0
+    if elapsed_time >= 60 and any(violation_counts.values()) and (time.time() - last_sent_time) >= 600:
+        asyncio.run(send_email_alert(violation_counts, violation_times, recipient_email))
+        last_sent_time = time.time()
+        violation_counts = {key: 0 for key in violation_counts}
         start_time = time.time()
 
-    # Streamlit display
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     frame_placeholder.image(frame, channels="RGB")
 
-    # Stop when user exits
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
-# Release resources
 cap.release()
 cv2.destroyAllWindows()
