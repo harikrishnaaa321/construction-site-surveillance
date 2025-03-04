@@ -1,6 +1,7 @@
 opencv-python
-ultralytics
-streamlit
-python-dotenv
-torch
 numpy
+streamlit
+ultralytics
+Pillow
+python-dotenv
+huggingface_hub
