@@ -28,7 +28,6 @@ You can download the dataset using:
 - **Model Architectures:** CNN, YOLO, Faster R-CNN
 - **Visualization:** Matplotlib, Seaborn
 
-## Model Architecture
 ![Model Architecture](https://github.com/user-attachments/assets/17d2f33a-00b9-4872-af7d-b671fe41e251)
 
 The model consists of:
